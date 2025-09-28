@@ -44,7 +44,7 @@ const char* DEVICE_NAME = "Garage Door";
 // =================================================================
 
 // --- Pinout ---
-// Most relay modules are active LOW (LOW turns relay ON).
+// This relay shield is active HIGH (HIGH turns relay ON).
 const int RELAY_PIN = D1; // D1 is GPIO5 on Wemos D1 Mini
 
 // --- Payloads ---
@@ -287,8 +287,8 @@ void publishDiscovery() {
   doc["command_topic"] = commandTopic;
   doc["state_topic"] = stateTopic;
   doc["availability_topic"] = availabilityTopic;
-  doc["payload_on"] = PAYLOAD_ON;
-  doc["payload_off"] = PAYLOAD_OFF;
+  doc["command_template"] = "{\"state\": \"{{ value }}\"}";
+  doc["state_value_template"] = "{{ value_json.state }}";
   doc["optimistic"] = false;
 
   // Add minimal device information
@@ -315,9 +315,10 @@ void publishDiscovery() {
  * @brief Handles incoming MQTT messages.
  */
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  // Null-terminate the payload to safely treat it as a C-string.
-  payload[length] = '\0';
-  char* message = (char*)payload;
+  // Create a safe buffer for the payload to avoid overwriting
+  char message[length + 1];
+  memcpy(message, payload, length);
+  message[length] = '\0';
 
   #ifdef SERIAL_DEBUG
     Serial.printf("[MQTT] Message received on topic: %s\n", topic);
@@ -326,15 +327,47 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   // Check if the message is for our command topic
   if (strcmp(topic, commandTopic) == 0) {
-    if (strcmp(message, PAYLOAD_ON) == 0) {
-      setRelayState(true);
-    } else if (strcmp(message, PAYLOAD_OFF) == 0) {
-      setRelayState(false);
+    #ifdef SERIAL_DEBUG
+      Serial.println("[MQTT] Command topic matched, processing...");
+    #endif
+    
+    // Parse JSON command: {"state": "ON"} or {"state": "OFF"}
+    StaticJsonDocument<64> cmdDoc;
+    DeserializationError error = deserializeJson(cmdDoc, message);
+    
+    if (error) {
+      #ifdef SERIAL_DEBUG
+        Serial.printf("[MQTT] JSON parse error: %s\n", error.c_str());
+      #endif
+      return;
+    }
+    
+    const char* stateValue = cmdDoc["state"];
+    if (stateValue) {
+      if (strcmp(stateValue, PAYLOAD_ON) == 0) {
+        #ifdef SERIAL_DEBUG
+          Serial.println("[MQTT] Turning relay ON");
+        #endif
+        setRelayState(true);
+      } else if (strcmp(stateValue, PAYLOAD_OFF) == 0) {
+        #ifdef SERIAL_DEBUG
+          Serial.println("[MQTT] Turning relay OFF");
+        #endif
+        setRelayState(false);
+      } else {
+        #ifdef SERIAL_DEBUG
+          Serial.printf("[MQTT] WARNING: Unknown state value: %s\n", stateValue);
+        #endif
+      }
     } else {
       #ifdef SERIAL_DEBUG
-        Serial.printf("[MQTT] WARNING: Unknown payload received: %s\n", message);
+        Serial.println("[MQTT] WARNING: No 'state' field in JSON");
       #endif
     }
+    
+    #ifdef SERIAL_DEBUG
+      Serial.println("[MQTT] Command processing complete");
+    #endif
   }
 }
 
@@ -373,6 +406,9 @@ void publishRelayState() {
  * @param newState The desired state: true for ON, false for OFF.
  */
 void setRelayState(bool newState) {
+  #ifdef SERIAL_DEBUG
+    Serial.printf("Setting Relay state to %s\n", newState ? "ON" : "OFF");
+  #endif
   // Only act if the state is actually changing
   if (newState == relayState) {
     return;
@@ -380,11 +416,14 @@ void setRelayState(bool newState) {
   
   relayState = newState;
   
-  // Most relay modules are "active LOW", meaning a LOW signal turns them ON.
-  digitalWrite(RELAY_PIN, relayState ? LOW : HIGH);
+  // This relay shield is "active HIGH", meaning a HIGH signal turns it ON.
+  int pinValue = relayState ? HIGH : LOW;
+  digitalWrite(RELAY_PIN, pinValue);
   
   #ifdef SERIAL_DEBUG
     Serial.printf("[RELAY] State changed to: %s\n", relayState ? "ON" : "OFF");
+    Serial.printf("[RELAY] Pin D1 (GPIO5) set to: %s\n", pinValue == LOW ? "LOW" : "HIGH");
+    Serial.printf("[RELAY] Digital read back: %s\n", digitalRead(RELAY_PIN) == LOW ? "LOW" : "HIGH");
   #endif
 
   // Report the new state back to Home Assistant
