@@ -36,8 +36,11 @@ const char* MQTT_PASSWORD = ""; // Leave blank if not used
 
 // --- Home Assistant Device Configuration ---
 // This ID must be unique across your Home Assistant instance
-const char* DEVICE_UNIQUE_ID = "garage_door"; 
+const char* DEVICE_UNIQUE_ID = "garage_door";
 const char* DEVICE_NAME = "Garage Door";
+
+// --- Door Sensor Configuration ---
+const char* DOOR_SENSOR_TOPIC = "homeassistant/binary_sensor/binary_sensor.contact_sensor_door/state";
 
 // =================================================================
 // HARDWARE & GLOBAL CONSTANTS
@@ -48,14 +51,20 @@ const char* DEVICE_NAME = "Garage Door";
 const int RELAY_PIN = D1; // D1 is GPIO5 on Wemos D1 Mini
 
 // --- Payloads ---
-const char* PAYLOAD_ON = "ON";
-const char* PAYLOAD_OFF = "OFF";
+const char* PAYLOAD_OPEN = "open";
+const char* PAYLOAD_CLOSE = "close";
+const char* PAYLOAD_STOP = "stop";
+const char* STATE_OPEN = "open";
+const char* STATE_CLOSED = "closed";
+const char* STATE_OPENING = "opening";
+const char* STATE_CLOSING = "closing";
 const char* PAYLOAD_AVAILABLE = "online";
 const char* PAYLOAD_NOT_AVAILABLE = "offline";
 
 
 // --- Timers ---
 const unsigned long RECONNECT_INTERVAL_MS = 5000; // Attempt reconnection every 5 seconds
+const unsigned long TRANSITION_TIMEOUT_MS = 60000; // 1 minute timeout for opening/closing states
 
 // =================================================================
 // GLOBAL VARIABLES
@@ -74,6 +83,9 @@ char availabilityTopic[128];
 
 // --- State Tracking ---
 bool relayState = false; // false = OFF, true = ON
+String coverState = STATE_CLOSED; // Current cover state: open, closed, opening, closing
+String lastConfirmedState = STATE_CLOSED; // Last confirmed state from door sensor
+unsigned long transitionStartTime = 0; // Time when transition started
 unsigned long lastWifiReconnectAttempt = 0;
 unsigned long lastMqttReconnectAttempt = 0;
 
@@ -87,7 +99,10 @@ void reconnectMqtt();
 void publishDiscovery();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void setRelayState(bool newState);
-void publishRelayState();
+void publishCoverState();
+void handleCoverCommand(const char* command);
+void handleDoorSensorUpdate(const char* sensorState);
+void checkTransitionTimeout();
 
 // =================================================================
 // SETUP
@@ -105,10 +120,10 @@ void setup() {
   setRelayState(false); // Set initial state to OFF
 
   // --- Generate MQTT Topics ---
-  snprintf(discoveryTopic, sizeof(discoveryTopic), "homeassistant/switch/%s/config", DEVICE_UNIQUE_ID);
-  snprintf(commandTopic, sizeof(commandTopic), "homeassistant/switch/%s/set", DEVICE_UNIQUE_ID);
-  snprintf(stateTopic, sizeof(stateTopic), "homeassistant/switch/%s/state", DEVICE_UNIQUE_ID);
-  snprintf(availabilityTopic, sizeof(availabilityTopic), "homeassistant/switch/%s/status", DEVICE_UNIQUE_ID);
+  snprintf(discoveryTopic, sizeof(discoveryTopic), "homeassistant/cover/%s/config", DEVICE_UNIQUE_ID);
+  snprintf(commandTopic, sizeof(commandTopic), "homeassistant/cover/%s/set", DEVICE_UNIQUE_ID);
+  snprintf(stateTopic, sizeof(stateTopic), "homeassistant/cover/%s/state", DEVICE_UNIQUE_ID);
+  snprintf(availabilityTopic, sizeof(availabilityTopic), "homeassistant/cover/%s/status", DEVICE_UNIQUE_ID);
 
   #ifdef SERIAL_DEBUG
     Serial.printf("[INFO] Device Name: %s\n", DEVICE_NAME);
@@ -143,6 +158,9 @@ void loop() {
   if (mqttClient.connected()) {
     mqttClient.loop();
   }
+
+  // Check if we've been in a transitional state too long
+  checkTransitionTimeout();
 }
 
 // =================================================================
@@ -237,6 +255,21 @@ void reconnectMqtt() {
         Serial.println("[MQTT] ERROR: Subscription failed!");
       #endif
     }
+
+    yield();
+
+    #ifdef SERIAL_DEBUG
+      Serial.println("[MQTT-DBG] Task: Subscribing to door sensor topic...");
+    #endif
+    if (mqttClient.subscribe(DOOR_SENSOR_TOPIC)) {
+      #ifdef SERIAL_DEBUG
+        Serial.printf("[MQTT] Subscribed to: %s\n", DOOR_SENSOR_TOPIC);
+      #endif
+    } else {
+      #ifdef SERIAL_DEBUG
+        Serial.println("[MQTT] ERROR: Door sensor subscription failed!");
+      #endif
+    }
     
     yield();
 
@@ -257,7 +290,7 @@ void reconnectMqtt() {
     #ifdef SERIAL_DEBUG
       Serial.println("[MQTT-DBG] Task: Publishing initial state...");
     #endif
-    publishRelayState();
+    publishCoverState();
 
     #ifdef SERIAL_DEBUG
       Serial.println("[MQTT-DBG] Post-connection tasks complete.");
@@ -281,21 +314,28 @@ void publishDiscovery() {
   // Use StaticJsonDocument for fixed-size payloads to avoid heap fragmentation.
   StaticJsonDocument<1024> doc;
 
-  // Configure the switch entity
+  // Configure the cover entity
   doc["name"] = DEVICE_NAME;
   doc["unique_id"] = DEVICE_UNIQUE_ID;
   doc["command_topic"] = commandTopic;
   doc["state_topic"] = stateTopic;
   doc["availability_topic"] = availabilityTopic;
-  doc["command_template"] = "{\"state\": \"{{ value }}\"}";
-  doc["state_value_template"] = "{{ value_json.state }}";
+  doc["payload_open"] = PAYLOAD_OPEN;
+  doc["payload_close"] = PAYLOAD_CLOSE;
+  doc["payload_stop"] = PAYLOAD_STOP;
+  doc["state_open"] = STATE_OPEN;
+  doc["state_closed"] = STATE_CLOSED;
+  doc["state_opening"] = STATE_OPENING;
+  doc["state_closing"] = STATE_CLOSING;
+  doc["device_class"] = "garage";
   doc["optimistic"] = false;
+  doc["retain"] = true;
 
   // Add minimal device information
   JsonObject device = doc.createNestedObject("device");
   device["identifiers"][0] = DEVICE_UNIQUE_ID;
   device["name"] = DEVICE_NAME;
-  
+
   String payload;
   serializeJson(doc, payload);
 
@@ -303,7 +343,7 @@ void publishDiscovery() {
     Serial.println("[MQTT] Publishing discovery payload:");
     Serial.println(payload);
   #endif
-  
+
   if (!mqttClient.publish(discoveryTopic, payload.c_str(), true)) {
     #ifdef SERIAL_DEBUG
       Serial.println("[MQTT] ERROR: Failed to publish discovery payload!");
@@ -328,72 +368,160 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Check if the message is for our command topic
   if (strcmp(topic, commandTopic) == 0) {
     #ifdef SERIAL_DEBUG
-      Serial.println("[MQTT] Command topic matched, processing...");
+      Serial.println("[MQTT] Command topic matched, processing cover command...");
     #endif
-    
-    // Parse JSON command: {"state": "ON"} or {"state": "OFF"}
-    StaticJsonDocument<64> cmdDoc;
-    DeserializationError error = deserializeJson(cmdDoc, message);
-    
+    handleCoverCommand(message);
+  }
+  // Check if the message is from the door sensor
+  else if (strcmp(topic, DOOR_SENSOR_TOPIC) == 0) {
+    #ifdef SERIAL_DEBUG
+      Serial.println("[MQTT] Door sensor topic matched, processing sensor update...");
+    #endif
+
+    // Parse JSON: {"device": "binary_sensor.ranch_slider_door", "state_reported": "off", "STATE": "CLOSED"}
+    StaticJsonDocument<256> sensorDoc;
+    DeserializationError error = deserializeJson(sensorDoc, message);
+
     if (error) {
       #ifdef SERIAL_DEBUG
         Serial.printf("[MQTT] JSON parse error: %s\n", error.c_str());
       #endif
       return;
     }
-    
-    const char* stateValue = cmdDoc["state"];
-    if (stateValue) {
-      if (strcmp(stateValue, PAYLOAD_ON) == 0) {
-        #ifdef SERIAL_DEBUG
-          Serial.println("[MQTT] Turning relay ON");
-        #endif
-        setRelayState(true);
-      } else if (strcmp(stateValue, PAYLOAD_OFF) == 0) {
-        #ifdef SERIAL_DEBUG
-          Serial.println("[MQTT] Turning relay OFF");
-        #endif
-        setRelayState(false);
-      } else {
-        #ifdef SERIAL_DEBUG
-          Serial.printf("[MQTT] WARNING: Unknown state value: %s\n", stateValue);
-        #endif
-      }
+
+    const char* sensorState = sensorDoc["STATE"];
+    if (sensorState) {
+      handleDoorSensorUpdate(sensorState);
     } else {
       #ifdef SERIAL_DEBUG
-        Serial.println("[MQTT] WARNING: No 'state' field in JSON");
+        Serial.println("[MQTT] WARNING: No 'STATE' field in door sensor JSON");
       #endif
     }
-    
-    #ifdef SERIAL_DEBUG
-      Serial.println("[MQTT] Command processing complete");
+  }
+}
+
+/**
+ * @brief Publishes the current cover state to the state topic.
+ */
+void publishCoverState() {
+  if (!mqttClient.connected()) return;
+
+  #ifdef SERIAL_DEBUG
+    Serial.printf("[MQTT] Publishing cover state: %s\n", coverState.c_str());
+  #endif
+
+  // Publish with retain=true
+  if (!mqttClient.publish(stateTopic, coverState.c_str(), true)) {
+     #ifdef SERIAL_DEBUG
+      Serial.println("[MQTT] ERROR: Failed to publish state!");
     #endif
   }
 }
 
 /**
- * @brief Publishes the current relay state to the state topic.
+ * @brief Handles cover commands from Home Assistant (open/close/stop).
  */
-void publishRelayState() {
-  if (!mqttClient.connected()) return;
-
-  const char* currentState = relayState ? PAYLOAD_ON : PAYLOAD_OFF;
-  
-  // Create JSON state payload
-  StaticJsonDocument<64> stateDoc;
-  stateDoc["state"] = currentState;
-  
-  String statePayload;
-  serializeJson(stateDoc, statePayload);
-  
+void handleCoverCommand(const char* command) {
   #ifdef SERIAL_DEBUG
-    Serial.printf("[MQTT] Publishing state: %s\n", statePayload.c_str());
+    Serial.printf("[COVER] Received command: %s\n", command);
   #endif
-  
-  if (!mqttClient.publish(stateTopic, statePayload.c_str(), true)) {
-     #ifdef SERIAL_DEBUG
-      Serial.println("[MQTT] ERROR: Failed to publish state!");
+
+  if (strcmp(command, PAYLOAD_OPEN) == 0) {
+    // Only trigger if not already open or opening
+    if (coverState != STATE_OPEN && coverState != STATE_OPENING) {
+      #ifdef SERIAL_DEBUG
+        Serial.println("[COVER] Opening door...");
+      #endif
+      coverState = STATE_OPENING;
+      transitionStartTime = millis(); // Start transition timer
+      publishCoverState();
+      setRelayState(true);
+      // Relay will pulse briefly (turned off in setRelayState logic)
+    }
+  }
+  else if (strcmp(command, PAYLOAD_CLOSE) == 0) {
+    // Only trigger if not already closed or closing
+    if (coverState != STATE_CLOSED && coverState != STATE_CLOSING) {
+      #ifdef SERIAL_DEBUG
+        Serial.println("[COVER] Closing door...");
+      #endif
+      coverState = STATE_CLOSING;
+      transitionStartTime = millis(); // Start transition timer
+      publishCoverState();
+      setRelayState(true);
+      // Relay will pulse briefly (turned off in setRelayState logic)
+    }
+  }
+  else if (strcmp(command, PAYLOAD_STOP) == 0) {
+    #ifdef SERIAL_DEBUG
+      Serial.println("[COVER] Stop command - triggering relay pulse");
     #endif
+    setRelayState(true);
+  }
+}
+
+/**
+ * @brief Handles door sensor state updates and syncs cover state.
+ */
+void handleDoorSensorUpdate(const char* sensorState) {
+  #ifdef SERIAL_DEBUG
+    Serial.printf("[SENSOR] Door sensor state: %s\n", sensorState);
+  #endif
+
+  // Convert sensor STATE to cover state
+  String newState;
+  if (strcmp(sensorState, "OPEN") == 0) {
+    newState = STATE_OPEN;
+  } else if (strcmp(sensorState, "CLOSED") == 0) {
+    newState = STATE_CLOSED;
+  } else {
+    #ifdef SERIAL_DEBUG
+      Serial.printf("[SENSOR] WARNING: Unknown sensor state: %s\n", sensorState);
+    #endif
+    return;
+  }
+
+  // Update last confirmed state
+  lastConfirmedState = newState;
+
+  // If we're in a transitional state, move to the confirmed state
+  if (coverState == STATE_OPENING || coverState == STATE_CLOSING) {
+    #ifdef SERIAL_DEBUG
+      Serial.printf("[SENSOR] Transitioning from %s to %s\n", coverState.c_str(), newState.c_str());
+    #endif
+    coverState = newState;
+    transitionStartTime = 0; // Clear transition timer
+    publishCoverState();
+  }
+  // If sensor state differs from current state, update to sensor state
+  else if (coverState != newState) {
+    #ifdef SERIAL_DEBUG
+      Serial.printf("[SENSOR] State mismatch! Updating from %s to %s\n", coverState.c_str(), newState.c_str());
+    #endif
+    coverState = newState;
+    publishCoverState();
+  }
+}
+
+/**
+ * @brief Checks if we've been in a transitional state too long and times out to sensor state.
+ */
+void checkTransitionTimeout() {
+  // Only check if we're in a transitional state
+  if (coverState != STATE_OPENING && coverState != STATE_CLOSING) {
+    return;
+  }
+
+  // Check if transition timer is set and has expired
+  if (transitionStartTime > 0 && (millis() - transitionStartTime > TRANSITION_TIMEOUT_MS)) {
+    #ifdef SERIAL_DEBUG
+      Serial.printf("[TIMEOUT] Transition timeout! Moving from %s to sensor state: %s\n",
+                    coverState.c_str(), lastConfirmedState.c_str());
+    #endif
+
+    coverState = lastConfirmedState;
+    transitionStartTime = 0; // Clear transition timer
+    publishCoverState();
   }
 }
 
@@ -402,31 +530,33 @@ void publishRelayState() {
 // =================================================================
 
 /**
- * @brief Sets the physical relay state and publishes the change.
+ * @brief Sets the physical relay state (momentary pulse for garage door).
  * @param newState The desired state: true for ON, false for OFF.
  */
 void setRelayState(bool newState) {
   #ifdef SERIAL_DEBUG
-    Serial.printf("Setting Relay state to %s\n", newState ? "ON" : "OFF");
+    Serial.printf("[RELAY] Setting relay state to %s\n", newState ? "ON" : "OFF");
   #endif
-  // Only act if the state is actually changing
-  if (newState == relayState) {
-    return;
-  }
-  
+
   relayState = newState;
-  
+
   // This relay shield is "active HIGH", meaning a HIGH signal turns it ON.
   int pinValue = relayState ? HIGH : LOW;
   digitalWrite(RELAY_PIN, pinValue);
-  
+
   #ifdef SERIAL_DEBUG
-    Serial.printf("[RELAY] State changed to: %s\n", relayState ? "ON" : "OFF");
     Serial.printf("[RELAY] Pin D1 (GPIO5) set to: %s\n", pinValue == LOW ? "LOW" : "HIGH");
-    Serial.printf("[RELAY] Digital read back: %s\n", digitalRead(RELAY_PIN) == LOW ? "LOW" : "HIGH");
   #endif
 
-  // Report the new state back to Home Assistant
-  publishRelayState();
+  // For garage door opener, we want a momentary pulse
+  // If turning ON, schedule to turn OFF after a brief delay
+  if (relayState) {
+    delay(500); // 500ms pulse
+    digitalWrite(RELAY_PIN, LOW);
+    relayState = false;
+    #ifdef SERIAL_DEBUG
+      Serial.println("[RELAY] Pulse complete, relay turned OFF");
+    #endif
+  }
 }
 
