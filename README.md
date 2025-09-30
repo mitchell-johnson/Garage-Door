@@ -33,33 +33,60 @@ Install these libraries through the Arduino IDE Library Manager.
 
 ## Configuration
 
-### WiFi & MQTT Settings
+### Initial Setup
 
-Update these values in the Arduino sketch:
+1. **Copy the example configuration file:**
+   ```bash
+   cd d1_mini_relay_controller
+   cp config.example.h config.h
+   ```
 
+2. **Edit `config.h` with your settings:**
+
+#### WiFi Configuration
 ```cpp
-// WiFi Credentials
 const char* WIFI_SSID = "your_wifi_ssid";
 const char* WIFI_PASSWORD = "your_wifi_password";
-
-// MQTT Broker Configuration
-const char* MQTT_BROKER_IP = "192.168.1.xxx";
-const int   MQTT_PORT = 1883;
-const char* MQTT_USERNAME = ""; // Optional
-const char* MQTT_PASSWORD = ""; // Optional
-
-// Device Configuration
-const char* DEVICE_UNIQUE_ID = "garage_door";
-const char* DEVICE_NAME = "Garage Door";
 ```
 
-### Door Sensor Integration
+#### MQTT Broker Configuration
+```cpp
+const char* MQTT_BROKER_IP = "192.168.1.100";  // Your MQTT broker IP
+const int   MQTT_PORT = 1883;                   // Default MQTT port
+const char* MQTT_USERNAME = "";                 // Optional authentication
+const char* MQTT_PASSWORD = "";                 // Optional authentication
+```
 
-Configure the door sensor topic to match your Home Assistant binary sensor:
+#### Device Configuration
+```cpp
+const char* DEVICE_UNIQUE_ID = "garage_door";   // Must be unique in Home Assistant
+const char* DEVICE_NAME = "Garage Door";        // Friendly name
+```
 
+#### Door Sensor Integration
 ```cpp
 const char* DOOR_SENSOR_TOPIC = "homeassistant/binary_sensor/binary_sensor.contact_sensor_door/state";
 ```
+
+**Expected sensor JSON format:**
+```json
+{
+  "device": "binary_sensor.contact_sensor_door",
+  "state_reported": "off",
+  "STATE": "CLOSED"
+}
+```
+
+The `STATE` field should be either `"OPEN"` or `"CLOSED"`.
+
+### Debug Mode
+
+To enable detailed serial logging at 115200 baud, uncomment in `config.h`:
+```cpp
+#define SERIAL_DEBUG
+```
+
+**Important:** The `config.h` file is excluded from version control to protect your credentials. Never commit this file to a public repository.
 
 ## MQTT Implementation Details
 
@@ -225,10 +252,11 @@ void setRelayState(bool newState) {
 4. Power the D1 Mini Pro
 
 ### 2. Software Setup
-1. Install required Arduino libraries
-2. Update configuration constants in the sketch
-3. Upload sketch to D1 Mini Pro
-4. Monitor serial output at 115200 baud for debugging
+1. Install required Arduino libraries via Arduino IDE Library Manager
+2. Copy `config.example.h` to `config.h`
+3. Update configuration values in `config.h` (WiFi, MQTT, device settings)
+4. Upload sketch to D1 Mini Pro
+5. Monitor serial output at 115200 baud for debugging (if `SERIAL_DEBUG` enabled)
 
 ### 3. Home Assistant Integration
 1. Ensure MQTT broker is running and accessible
@@ -262,7 +290,7 @@ void setRelayState(bool newState) {
 
 ### Debug Mode
 
-Enable detailed logging by uncommenting:
+Enable detailed logging by uncommenting in `config.h`:
 ```cpp
 #define SERIAL_DEBUG
 ```

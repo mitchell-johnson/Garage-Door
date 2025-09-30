@@ -17,30 +17,16 @@
 #include <ArduinoJson.h>
 
 // =================================================================
-// CONFIGURATION - UPDATE THESE VALUES
+// CONFIGURATION
 // =================================================================
 
-// --- Serial Debugging ---
-// Uncomment the next line to enable detailed serial logging (115200 baud)
-#define SERIAL_DEBUG
-
-// --- WiFi Credentials ---
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-
-// --- MQTT Broker Configuration ---
-const char* MQTT_BROKER_IP = "YOUR_MQTT_BROKER_IP";
-const int   MQTT_PORT = 1883;
-const char* MQTT_USERNAME = ""; // Leave blank if not used
-const char* MQTT_PASSWORD = ""; // Leave blank if not used
-
-// --- Home Assistant Device Configuration ---
-// This ID must be unique across your Home Assistant instance
-const char* DEVICE_UNIQUE_ID = "garage_door";
-const char* DEVICE_NAME = "Garage Door";
-
-// --- Door Sensor Configuration ---
-const char* DOOR_SENSOR_TOPIC = "homeassistant/binary_sensor/binary_sensor.contact_sensor_door/state";
+// Try to include local config.h file (not tracked in git)
+// If it doesn't exist, you'll get a compilation error with instructions
+#if __has_include("config.h")
+  #include "config.h"
+#else
+  #error "config.h not found! Please copy config.example.h to config.h and update with your settings"
+#endif
 
 // =================================================================
 // HARDWARE & GLOBAL CONSTANTS

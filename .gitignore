@@ -1,0 +1,14 @@
+# Local configuration files (contain sensitive credentials)
+d1_mini_relay_controller/config.h
+
+# Arduino build artifacts
+*.hex
+*.elf
+*.bin
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
