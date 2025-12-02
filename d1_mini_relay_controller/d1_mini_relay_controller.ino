@@ -102,8 +102,11 @@ void setup() {
   #endif
 
   // --- Configure Relay Pin ---
+  // Ensure relay is OFF before configuring pin to prevent power-on cycling
+  digitalWrite(RELAY_PIN, LOW);
   pinMode(RELAY_PIN, OUTPUT);
-  setRelayState(false); // Set initial state to OFF
+  digitalWrite(RELAY_PIN, LOW); // Ensure relay stays OFF after pinMode
+  relayState = false;
 
   // --- Generate MQTT Topics ---
   snprintf(discoveryTopic, sizeof(discoveryTopic), "homeassistant/cover/%s/config", DEVICE_UNIQUE_ID);
